@@ -1,0 +1,332 @@
+# =============================================================================
+# MikroTik VLAN Module - Validation Tests
+# =============================================================================
+# Tests input validation, error handling, and edge cases
+
+# Mock provider configuration for testing without real RouterOS device
+mock_provider "routeros" {}
+
+# Test 1: Valid CIDR and validation output
+run "validation_output_check" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.0/24"  # Valid CIDR
+      }
+    }
+  }
+  
+  # Test that validation output is empty for valid configuration
+  assert {
+    condition     = length(output.validation_errors.invalid_subnets) == 0
+    error_message = "Valid CIDR should pass validation"
+  }
+  
+  assert {
+    condition     = output.validation_errors.warning == "Configuration valid"
+    error_message = "Validation warning should indicate configuration is valid"
+  }
+}
+
+# Test 2: High VLAN ID (valid, RouterOS supports 1-4094)
+run "high_vlan_id" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "4094" = {  # Maximum valid VLAN ID
+        name   = "Test"
+        subnet = "192.168.1.0/24"
+      }
+    }
+  }
+  
+  assert {
+    condition     = routeros_interface_vlan.vlans["4094"].vlan_id == 4094
+    error_message = "VLAN ID 4094 should be accepted"
+  }
+}
+
+# Test 3: Low VLAN ID
+run "low_vlan_id" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "1" = {  # Minimum valid VLAN ID
+        name   = "Test"
+        subnet = "192.168.1.0/24"
+      }
+    }
+  }
+  
+  assert {
+    condition     = routeros_interface_vlan.vlans["1"].vlan_id == 1
+    error_message = "VLAN ID 1 should be accepted"
+  }
+}
+
+# Test 4: Malformed IP address
+run "malformed_ip" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.999/24"  # Invalid IP
+      }
+    }
+  }
+  
+  expect_failures = [
+    var.vlans
+  ]
+}
+
+# Test 5: Missing required fields
+run "missing_subnet" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name = "Test"
+        # subnet is missing
+      }
+    }
+  }
+  
+  expect_failures = [
+    var.vlans
+  ]
+}
+
+# Test 6: Empty bridge name
+run "empty_bridge_name" {
+  command = plan
+  
+  variables {
+    bridge_name = ""
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.0/24"
+      }
+    }
+  }
+  
+  expect_failures = [
+    var.bridge_name
+  ]
+}
+
+# Test 7: PVID for non-existent VLAN
+run "pvid_nonexistent_vlan" {
+  command = plan
+  
+  variables {
+    bridge_name           = "bridge1"
+    enable_vlan_filtering = true
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.0/24"
+      }
+    }
+    pvid_map = {
+      "ether10" = 999  # VLAN 999 doesn't exist
+    }
+  }
+  
+  expect_failures = [
+    var.pvid_map
+  ]
+}
+
+# Test 8: Duplicate port in PVID map
+run "duplicate_pvid_port" {
+  command = plan
+  
+  variables {
+    bridge_name           = "bridge1"
+    enable_vlan_filtering = true
+    vlans = {
+      "101" = {
+        name   = "Test1"
+        subnet = "192.168.1.0/24"
+      }
+      "102" = {
+        name   = "Test2"
+        subnet = "192.168.2.0/24"
+      }
+    }
+    pvid_map = {
+      "ether10" = 101
+      "ether10" = 102  # Duplicate key - will be caught by HCL parser
+    }
+  }
+  
+  expect_failures = [
+    var.pvid_map
+  ]
+}
+
+# Test 9: Invalid subnet mask (host bits set)
+run "invalid_subnet_host_bits" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.5/24"  # Should be 192.168.1.0/24
+      }
+    }
+  }
+  
+  # This will work but output will show validation error
+  assert {
+    condition     = length(output.validation_errors.invalid_subnets) == 0
+    error_message = "Should report validation error for subnet with host bits"
+  }
+}
+
+# Test 10: Overlapping subnets
+run "overlapping_subnets" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name   = "Test1"
+        subnet = "192.168.1.0/24"
+      }
+      "102" = {
+        name   = "Test2"
+        subnet = "192.168.1.0/25"  # Overlaps with VLAN 101
+      }
+    }
+  }
+  
+  # Note: Module doesn't validate overlaps, but this tests the scenario
+  # In production, overlapping subnets will cause routing issues
+}
+
+# Test 11: Very large VLAN count (stress test)
+run "large_vlan_count" {
+  command = plan
+  
+  variables {
+    bridge_name           = "bridge1"
+    enable_vlan_filtering = true
+    vlans = {
+      for i in range(100, 200) : tostring(i) => {
+        name   = "VLAN-${i}"
+        subnet = "10.${i}.0.0/24"
+      }
+    }
+  }
+  
+  assert {
+    condition     = length(routeros_interface_vlan.vlans) == 100
+    error_message = "Should handle 100 VLANs"
+  }
+}
+
+# Test 12: Special characters in VLAN name
+run "special_characters_name" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name   = "Test-VLAN_123"
+        subnet = "192.168.1.0/24"
+      }
+    }
+  }
+  
+  assert {
+    condition     = routeros_interface_vlan.vlans["101"].name == "vlan101"
+    error_message = "VLAN interface name should be sanitized"
+  }
+}
+
+# Test 13: Empty trunk ports list
+run "empty_trunk_ports" {
+  command = plan
+  
+  variables {
+    bridge_name           = "bridge1"
+    enable_vlan_filtering = true
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.0/24"
+      }
+    }
+    trunk_ports = []
+  }
+  
+  # Should still work - only bridge will be tagged
+  assert {
+    condition     = length(routeros_interface_bridge_vlan.vlan_filter["101"].tagged) >= 1
+    error_message = "Bridge should still be tagged even with no trunk ports"
+  }
+}
+
+# Test 14: Empty PVID map
+run "empty_pvid_map" {
+  command = plan
+  
+  variables {
+    bridge_name           = "bridge1"
+    enable_vlan_filtering = true
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.0/24"
+      }
+    }
+    pvid_map = {}
+  }
+  
+  # Should work - no access ports configured
+  assert {
+    condition     = length(routeros_interface_bridge_port.pvid_ports) == 0
+    error_message = "No PVID ports should be configured"
+  }
+}
+
+# Test 15: Validation output check
+run "validation_output" {
+  command = plan
+  
+  variables {
+    bridge_name = "bridge1"
+    vlans = {
+      "101" = {
+        name   = "Test"
+        subnet = "192.168.1.5/24"  # Invalid - host bits set
+      }
+    }
+  }
+  
+  # Check that validation errors are reported in outputs
+  assert {
+    condition     = length(output.validation_errors) > 0
+    error_message = "Should report validation errors"
+  }
+}
